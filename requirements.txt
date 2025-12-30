@@ -1,0 +1,9 @@
+streamlit
+pandas
+ocpp==0.12.1
+websockets
+fastapi
+uvicorn
+stripe
+pytz
+qrcode
