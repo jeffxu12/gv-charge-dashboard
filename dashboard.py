@@ -1,5 +1,6 @@
 import sys
 import os
+import glob
 
 # 1. 基础环境修复
 try:
@@ -16,6 +17,9 @@ import altair as alt
 from supabase import create_client
 import time
 from datetime import datetime
+import qrcode
+from PIL import Image
+import io
 
 # ==========================================
 # ⚡️ Supabase 配置
@@ -35,16 +39,16 @@ except Exception:
     SUPABASE_KEY = LOCAL_KEY
 
 # ==========================================
-# 🎨 页面配置 (Admin 风格)
+# 🎨 页面配置
 # ==========================================
 st.set_page_config(
-    page_title="GV-Charge Admin Pro", 
-    page_icon="🛡️", 
+    page_title="GV-Charge 总控平台", 
+    page_icon="⚡️", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# 初始化数据库连接
+# 初始化连接
 @st.cache_resource
 def init_connection():
     try:
@@ -55,41 +59,32 @@ def init_connection():
 supabase = init_connection()
 
 # ==========================================
-# 🔐 1. 登录系统 (修复版 - 更加稳健)
+# 🔐 登录逻辑
 # ==========================================
 def check_password():
-    """Returns `True` if the user had a correct password."""
-    
-    # 初始化登录状态
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
-
-    # 如果已经登录成功，直接返回 True
     if st.session_state["password_correct"]:
         return True
-
-    # 显示登录框
+    
     col1, col2, col3 = st.columns([1,2,1])
     with col2:
-        st.markdown("### 🛡️ GV-Charge 管理后台")
-        st.info("请输入管理员密码以继续")
-        password = st.text_input("Password:", type="password")
-        
+        st.markdown("### ⚡️ GV-Charge 运营管理平台")
+        st.info("系统升级中：请输入管理员密码 (admin123)")
+        password = st.text_input("Password", type="password")
         if password:
             if password == "admin123":
                 st.session_state["password_correct"] = True
-                st.rerun()  # 登录成功立刻刷新
+                st.rerun()
             else:
                 st.error("❌ 密码错误")
-    
     return False
 
-# 🛑 如果密码不对，直接停止运行下面的代码
 if not check_password():
     st.stop()
 
 # ==========================================
-# 🧠 数据获取与处理
+# 🧠 数据获取
 # ==========================================
 def get_transactions():
     if not supabase: return pd.DataFrame()
@@ -97,13 +92,10 @@ def get_transactions():
         response = supabase.table("transactions").select("*").order("created_at", desc=True).execute()
         if not response.data: return pd.DataFrame()
         df = pd.DataFrame(response.data)
-        # 清洗
         df['created_at'] = pd.to_datetime(df['created_at'])
         if df['created_at'].dt.tz is None:
             df['created_at'] = df['created_at'].dt.tz_localize('UTC')
         df['local_time'] = df['created_at'].dt.tz_convert('America/Vancouver')
-        
-        # 确保数值类型正确
         df['total_fee'] = df['total_fee'].astype(float)
         df['kwh'] = df['kwh'].astype(float)
         return df
@@ -111,164 +103,204 @@ def get_transactions():
         return pd.DataFrame()
 
 # ==========================================
-# 🖥️ 侧边栏：全局控制
+# 🖥️ 侧边栏菜单
 # ==========================================
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/900/900834.png", width=50)
-    st.title("Admin Pro")
-    st.success(f"🟢 Online: SuperAdmin")
-    st.caption(f"Region: Metro Vancouver")
+    st.title("Admin Pro 2.0")
+    st.caption("Metro Vancouver Region")
+    
+    page = st.radio("功能导航", [
+        "📊 运营大屏 (Dashboard)", 
+        "📍 资产与二维码 (Assets & QR)", 
+        "🧾 发票与财务 (Invoices)",
+        "🛠️ 设备运维 (Ops)"
+    ])
     
     st.divider()
     
-    # 导航模式
-    page_mode = st.radio("系统模块 (Modules)", ["📊 监控大屏 (Dashboard)", "🛠️ 设备运维 (Device Ops)", "💰 财务报表 (Finance)"])
+    # 这里是一个关键设置：让用户输入 Ngrok 地址
+    st.subheader("🌐 支付网关配置")
+    ngrok_url = st.text_input("当前 Ngrok 网址 (不带/scan)", placeholder="https://xxxx.ngrok-free.app")
+    st.caption("⚠️ 用于生成二维码，请复制终端里的网址")
     
     st.divider()
-    if st.button("🚪 退出登录 (Logout)"):
+    if st.button("退出登录"):
         st.session_state["password_correct"] = False
         st.rerun()
 
 # ==========================================
-# 📊 模块 1：监控大屏 (Dashboard)
+# 📍 模块：资产与二维码 (这是你要的！地址、型号、扫码)
 # ==========================================
-if page_mode == "📊 监控大屏 (Dashboard)":
-    st.title("📊 运营监控中心")
+if page == "📍 资产与二维码 (Assets & QR)":
+    st.title("📍 充电站资产管理")
+    st.info("这里展示每台设备的详细物理信息，并可生成打印用的二维码物料。")
     
-    # 自动刷新逻辑
-    if st.toggle('🔴 实时自动刷新 (Live Refresh)', value=True):
-        time.sleep(3)
-        st.rerun()
-
-    df = get_transactions()
-    
-    if not df.empty:
-        # KPI Row
-        col1, col2, col3, col4 = st.columns(4)
-        total_rev = df['total_fee'].sum()
-        # 计算今日营收
-        today = datetime.now().date()
-        today_rev = df[df['local_time'].dt.date == today]['total_fee'].sum()
-        
-        col1.metric("💰 总营收 (Lifetime)", f"${total_rev:,.2f}")
-        col2.metric("📅 今日营收 (Today)", f"${today_rev:,.2f}")
-        col3.metric("🔌 活跃站点", df['unit_id'].nunique())
-        col4.metric("🚨 系统状态", "Normal")
-
-        st.divider()
-
-        # Charts Row
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.subheader("📈 营收趋势 (Revenue Trend)")
-            chart = alt.Chart(df.tail(100)).mark_area(
-                line={'color':'darkblue'},
-                color=alt.Gradient(
-                    gradient='linear',
-                    stops=[alt.GradientStop(color='white', offset=0),
-                           alt.GradientStop(color='darkblue', offset=1)],
-                    x1=1, x2=1, y1=1, y2=0
-                )
-            ).encode(
-                x=alt.X('local_time', format='%H:%M', title="Time"),
-                y='total_fee',
-                tooltip=['local_time', 'total_fee']
-            ).properties(height=350)
-            st.altair_chart(chart, use_container_width=True)
-            
-        with c2:
-            st.subheader("📍 站点分布 (Station Share)")
-            pie = alt.Chart(df).mark_arc(innerRadius=60).encode(
-                theta='sum(total_fee)',
-                color='unit_id',
-                tooltip=['unit_id', 'sum(total_fee)']
-            ).properties(height=350)
-            st.altair_chart(pie, use_container_width=True)
-
-# ==========================================
-# 🛠️ 模块 2：设备运维 (Device Ops)
-# ==========================================
-elif page_mode == "🛠️ 设备运维 (Device Ops)":
-    st.title("🛠️ 设备全生命周期管理")
-    st.info("💡 提示：管理员可在此手动修改设备状态，或下发远程指令。")
-
-    # 1. 模拟设备数据 (用 Session State 保持修改)
-    if "device_status" not in st.session_state:
-        st.session_state["device_status"] = pd.DataFrame([
-            {"Unit ID": "VAN-001", "Location": "Burnaby, Metrotown", "Status": "Online", "Health": 98, "Version": "v1.2.0"},
-            {"Unit ID": "RIC-002", "Location": "Richmond, Aberdeen", "Status": "Online", "Health": 95, "Version": "v1.2.0"},
-            {"Unit ID": "SUR-003", "Location": "Surrey, Central", "Status": "Maintenance", "Health": 45, "Version": "v1.0.1"},
-        ])
-
-    # 2. 交互式编辑器
-    st.subheader("🔌 充电桩状态控制台")
-    
-    edited_df = st.data_editor(
-        st.session_state["device_status"],
-        column_config={
-            "Health": st.column_config.ProgressColumn(
-                "Health Score", format="%d%%", min_value=0, max_value=100
-            ),
-            "Status": st.column_config.SelectboxColumn(
-                "System Status",
-                options=["Online", "Offline", "Maintenance", "Faulted"],
-                required=True
-            )
+    # 1. 定义详细的资产数据
+    asset_data = [
+        {
+            "Unit ID": "VAN-001", 
+            "Model": "Tesla V3 Supercharger", 
+            "Power": "250 kW",
+            "Address": "4700 Kingsway, Burnaby, BC (Metrotown P1)", 
+            "Connector": "CCS2 / NACS",
+            "Install Date": "2024-01-15"
         },
-        num_rows="dynamic",
-        use_container_width=True
+        {
+            "Unit ID": "RIC-002", 
+            "Model": "ChargePoint CP6000", 
+            "Power": "150 kW",
+            "Address": "4151 Hazelbridge Way, Richmond, BC (Aberdeen)", 
+            "Connector": "CCS2",
+            "Install Date": "2024-02-20"
+        },
+        {
+            "Unit ID": "SUR-003", 
+            "Model": "Flo CoRe+ Max", 
+            "Power": "50 kW",
+            "Address": "10153 King George Blvd, Surrey, BC", 
+            "Connector": "CHAdeMO / CCS",
+            "Install Date": "2024-03-10"
+        }
+    ]
+    df_assets = pd.DataFrame(asset_data)
+    
+    # 2. 展示资产表格
+    st.dataframe(
+        df_assets, 
+        use_container_width=True,
+        column_config={
+            "Install Date": st.column_config.DateColumn("安装日期")
+        }
     )
-
-    if st.button("💾 保存状态变更 (Save to Cloud)"):
-        st.session_state["device_status"] = edited_df
-        st.toast("✅ 设备状态已同步成功！", icon="☁️")
-        
+    
     st.divider()
     
-    # 3. 远程命令下发
-    st.subheader("📡 远程指令中心 (Command Center)")
-    col1, col2 = st.columns(2)
-    with col1:
-        target_unit = st.selectbox("选择目标设备", ["VAN-001", "RIC-002", "SUR-003"])
-    with col2:
-        action = st.selectbox("选择操作指令", ["Remote Reset (软重启)", "Unlock Connector (解锁枪头)", "Firmware Update (固件升级)"])
-        
-    if st.button("🚀 发送指令 (Execute)"):
-        with st.spinner(f"正在连接 {target_unit}..."):
-            time.sleep(1.5)
-            st.success(f"✅ 指令 [{action}] 已发送至 {target_unit}。设备响应正常。")
+    # 3. 二维码生成工厂
+    st.subheader("🖨️ 物料生成中心 (QR Code Generator)")
+    
+    if not ngrok_url:
+        st.warning("⚠️ 请在侧边栏输入当前的 Ngrok 网址，否则无法生成有效二维码！")
+    else:
+        # 清洗 URL，防止用户多输了 /scan
+        clean_url = ngrok_url.rstrip("/")
+        if "/scan" in clean_url:
+            clean_url = clean_url.split("/scan")[0]
+            
+        cols = st.columns(3)
+        for index, row in enumerate(asset_data):
+            unit_id = row["Unit ID"]
+            full_link = f"{clean_url}/scan/{unit_id}"
+            
+            with cols[index % 3]:
+                st.markdown(f"**{unit_id}**")
+                
+                # 生成二维码
+                qr = qrcode.QRCode(box_size=10, border=4)
+                qr.add_data(full_link)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                
+                # 转换成 streamlit 能显示的格式
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                st.image(img_byte_arr, caption=f"扫码充电: {unit_id}", width=200)
+                
+                st.code(full_link, language="text")
+                st.caption(f"📍 {row['Address']}")
 
 # ==========================================
-# 💰 模块 3：财务报表 (Finance)
+# 🧾 模块：发票与财务 (这里解决“发票在哪”的问题)
 # ==========================================
-elif page_mode == "💰 财务报表 (Finance)":
-    st.title("💰 财务对账系统")
+elif page == "🧾 发票与财务 (Invoices)":
+    st.title("🧾 财务与票据中心")
     
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("📂 本地发票归档 (Local Archive)")
+        st.markdown("系统生成的 PDF 发票默认存储在服务器的 `invoices/` 目录下。")
+        
+        # 扫描 invoices 文件夹
+        if os.path.exists("invoices"):
+            files = glob.glob("invoices/*.pdf")
+            # 按时间倒序
+            files.sort(key=os.path.getmtime, reverse=True)
+            
+            if files:
+                invoice_list = []
+                for f in files:
+                    file_name = os.path.basename(f)
+                    file_time = datetime.fromtimestamp(os.path.getmtime(f)).strftime('%Y-%m-%d %H:%M:%S')
+                    file_size = f"{os.path.getsize(f) / 1024:.1f} KB"
+                    invoice_list.append({"File Name": file_name, "Generated Time": file_time, "Size": file_size, "Path": f})
+                
+                df_inv = pd.DataFrame(invoice_list)
+                st.dataframe(df_inv, use_container_width=True)
+                
+                st.info(f"💡 共找到 {len(files)} 张发票。请在您的电脑文件夹 `/charging platform/invoices` 中打开它们。")
+            else:
+                st.warning("📭 文件夹存在，但没有发现 PDF 文件。请先尝试支付一笔订单。")
+        else:
+            st.error("❌ 未找到 `invoices` 文件夹。请确保您已经运行过 qr_server.py 并完成了至少一笔支付。")
+
+    with col2:
+        st.subheader("📊 实时流水")
+        df_trans = get_transactions()
+        if not df_trans.empty:
+            st.dataframe(
+                df_trans[['local_time', 'unit_id', 'total_fee']], 
+                use_container_width=True,
+                hide_index=True
+            )
+
+# ==========================================
+# 📊 模块：运营大屏 (保留之前的)
+# ==========================================
+elif page == "📊 运营大屏 (Dashboard)":
+    st.title("📊 运营监控中心")
+    if st.toggle('🔴 自动刷新', value=True):
+        time.sleep(3)
+        st.rerun()
+        
     df = get_transactions()
-    
     if not df.empty:
-        st.subheader("📊 月度营收详情")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("💰 总营收", f"${df['total_fee'].sum():,.2f}")
+        k2.metric("⚡️ 总电量", f"{df['kwh'].sum():,.1f} kWh")
+        k3.metric("🧾 订单数", len(df))
         
-        # 简单的数据处理
-        df['Date'] = df['local_time'].dt.date
-        daily_report = df.groupby('Date')[['total_fee', 'kwh']].sum().sort_index(ascending=False)
-        
-        # 展示表格
-        st.dataframe(
-            daily_report,
-            use_container_width=True,
-            column_config={
-                "total_fee": st.column_config.NumberColumn("Revenue (CAD)", format="$%.2f"),
-                "kwh": st.column_config.NumberColumn("Energy (kWh)", format="%.2f kWh"),
-            }
-        )
-        
-        # 下载按钮
-        st.download_button(
-            label="📥 导出 Excel 报表 (CSV)",
-            data=daily_report.to_csv().encode('utf-8'),
-            file_name='financial_report.csv',
-            mime='text/csv',
-        )
-    else:
-        st.warning("暂无交易数据，请先进行模拟充电。")
+        c1, c2 = st.columns([2,1])
+        with c1:
+            st.altair_chart(alt.Chart(df.tail(50)).mark_area(color='darkblue', opacity=0.5).encode(
+                x='local_time', y='total_fee'
+            ).properties(height=300), use_container_width=True)
+        with c2:
+            st.altair_chart(alt.Chart(df).mark_arc().encode(
+                theta='sum(total_fee)', color='unit_id'
+            ), use_container_width=True)
+
+# ==========================================
+# 🛠️ 模块：设备运维 (保留之前的)
+# ==========================================
+elif page == "🛠️ 设备运维 (Ops)":
+    st.title("🛠️ 远程运维")
+    st.info("模拟远程控制设备状态。")
+    
+    # 模拟状态
+    if "device_table" not in st.session_state:
+        st.session_state["device_table"] = pd.DataFrame([
+             {"Unit ID": "VAN-001", "Status": "Online", "Health": 98},
+             {"Unit ID": "RIC-002", "Status": "Online", "Health": 95},
+             {"Unit ID": "SUR-003", "Status": "Offline", "Health": 0},
+        ])
+    
+    edited_df = st.data_editor(
+        st.session_state["device_table"],
+        column_config={
+             "Status": st.column_config.SelectboxColumn(options=["Online", "Offline", "Maintenance"])
+        },
+        use_container_width=True
+    )
+    if st.button("保存状态"):
+        st.session_state["device_table"] = edited_df
+        st.success("状态已更新")
